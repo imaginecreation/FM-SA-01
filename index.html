@@ -860,7 +860,7 @@
 
         // ตรวจสอบ LIFF ID หากไม่มีให้ใช้ค่าเริ่มต้น
         if (!self.liffId || self.liffId.length < 5) {
-          self.liffId = '2009016720-cesy3wsR';
+          self.liffId = '2009018471-L2UlwMA6';
         }
 
         // ตรวจสอบพารามิเตอร์ทดสอบเฉพาะสำหรับนักพัฒนา (?mock=true หรือเปิดบน localhost)
@@ -980,19 +980,43 @@
       verifyUserOnServer_: function(lineUid, displayName, callback) {
         var self = this;
         var cacheKey = 'fmsa01_auth_' + lineUid;
+        var cacheTimeKey = 'fmsa01_auth_time_' + lineUid;
+        var AUTH_TTL = 24 * 60 * 60 * 1000; // 24 ชั่วโมง
 
-        // ดึงสิทธิ์จาก sessionStorage ก่อน เพื่อให้เปิดหน้าจอได้ทันที (Zero Wait Time)
+        // ดึงสิทธิ์จาก localStorage/sessionStorage ก่อน เพื่อให้เปิดหน้าจอได้ทันที (Zero Wait Time < 0.05s)
         var cached = null;
+        var cachedTime = 0;
         try {
-          var raw = sessionStorage.getItem(cacheKey);
+          var raw = localStorage.getItem(cacheKey) || sessionStorage.getItem(cacheKey);
+          var rawTime = localStorage.getItem(cacheTimeKey);
           if (raw) cached = JSON.parse(raw);
+          if (rawTime) cachedTime = parseInt(rawTime, 10) || 0;
         } catch (e) {}
 
-        if (cached && cached.users_name) {
+        var isCacheValid = cached && cached.users_name && (Date.now() - cachedTime < AUTH_TTL);
+
+        if (isCacheValid) {
+          console.log('[App] Fast-path Auth hit from localStorage for UID:', lineUid);
           self.currentUser = cached;
           self.renderUserProfileHeader_();
           self.hideLoading();
           if (callback) callback(self.currentUser);
+
+          // Background revalidation (Stale-While-Revalidate) หากแคชเกิน 1 ชั่วโมง แอบ sync เงียบๆ ด้านหลัง
+          if (Date.now() - cachedTime > 60 * 60 * 1000) {
+            self.callServer('apiVerifyUser', lineUid).then(function(res) {
+              if (res && res.success && res.data) {
+                self.currentUser = res.data;
+                try {
+                  localStorage.setItem(cacheKey, JSON.stringify(res.data));
+                  localStorage.setItem(cacheTimeKey, String(Date.now()));
+                } catch (e) {}
+                self.renderUserProfileHeader_();
+              }
+            }).catch(function(err) {
+              console.warn('[App] Background auth revalidation error (ignored):', err);
+            });
+          }
           return;
         }
 
@@ -1003,7 +1027,11 @@
             self.hideLoading();
             if (res && res.success && res.data) {
               self.currentUser = res.data;
-              try { sessionStorage.setItem(cacheKey, JSON.stringify(res.data)); } catch (e) {}
+              try {
+                localStorage.setItem(cacheKey, JSON.stringify(res.data));
+                localStorage.setItem(cacheTimeKey, String(Date.now()));
+                sessionStorage.setItem(cacheKey, JSON.stringify(res.data));
+              } catch (e) {}
               self.renderUserProfileHeader_();
               if (callback) callback(self.currentUser);
             } else {
@@ -1013,6 +1041,14 @@
           })
           .catch(function(err) {
             self.hideLoading();
+            // กรณีเชื่อมต่อเซิร์ฟเวอร์ไม่ได้หรือ Timeout แต่มีแคชเก่าในเครื่อง ให้กู้คืนมาใช้งานต่อได้เลย
+            if (cached && cached.users_name) {
+              console.warn('[App] Server call failed, using expired cache as fallback');
+              self.currentUser = cached;
+              self.renderUserProfileHeader_();
+              if (callback) callback(self.currentUser);
+              return;
+            }
             self.showAccessDeniedScreen('เกิดข้อผิดพลาดในการตรวจสอบสิทธิ์: ' + (err.message || err));
           });
       },
@@ -1353,6 +1389,14 @@
           localStorage.removeItem('FMSA03_LOCAL_PROJECTS');
           localStorage.removeItem('FMSA03_LOCAL_APPROVERS');
           localStorage.removeItem('FMSA03_LOCAL_CACHE_TIME');
+
+          // เคลียร์แคชยืนยันตัวตน เพื่อบังคับเช็คสิทธิ์ใหม่
+          if (window.App && window.App.currentUser && window.App.currentUser.line_uid) {
+            var uid = window.App.currentUser.line_uid;
+            localStorage.removeItem('fmsa01_auth_' + uid);
+            localStorage.removeItem('fmsa01_auth_time_' + uid);
+            sessionStorage.removeItem('fmsa01_auth_' + uid);
+          }
         } catch (e) {
           console.warn('[ChecklistModule] clearLocalCache_ error:', e);
         }
