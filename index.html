@@ -967,6 +967,43 @@
       gasUrl: 'https://script.google.com/macros/s/AKfycbyLAHedoFlBoGRtrmuC47cAklw-rOWiZd8Gw0u4W400Lgabep1FjWFZs6KVS005e3ZXyw/exec',
       _loadingTimer: null,
       _inFlightRequests: {},
+      _queueCheckDone: false,
+
+      /**
+       * เรียกเมื่อ Checklist พร้อมทำงานแล้ว เพื่อเริ่มตรวจสอบคิวรออนุมัติในพื้นหลังอย่างปลอดภัย
+       * ป้องกันการชนกัน (Concurrency collision) กับ apiGetChecklistForm ในจังหวะเปิดแอปครั้งแรก
+       */
+      onChecklistLoaded: function () {
+        var self = this;
+        if (self._queueCheckDone) return;
+        self._queueCheckDone = true;
+        if (!self.currentUser || !self.currentUser.line_uid) return;
+
+        setTimeout(function () {
+          var user = self.currentUser;
+          var now = new Date();
+          var currentMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+          self.callServer('apiGetApprovalQueue', user.line_uid, currentMonth, user.users_name)
+            .then(function (res) {
+              if (res && res.success && res.data) {
+                if (window.ApprovalModule) {
+                  ApprovalModule.cachedQueueData = res.data;
+                  ApprovalModule.lastLoadedMonth = currentMonth;
+                  ApprovalModule.applyQueueData_(res.data);
+                }
+                var total = (res.data.asL1 ? res.data.asL1.length : 0) + (res.data.asL2 ? res.data.asL2.length : 0);
+                var badge = document.getElementById('approvalQueueBadge');
+                if (badge) {
+                  badge.textContent = total;
+                  badge.style.display = total > 0 ? 'inline-block' : 'none';
+                }
+              }
+            })
+            .catch(function (e) {
+              console.warn('[Badge] queue check error:', e);
+            });
+        }, 1500);
+      },
 
       init: function (onReady) {
         var self = this;
@@ -1538,30 +1575,17 @@
       clearLocalCache_: function () {
         try {
           var keys = this.getCacheKeys_();
-          localStorage.removeItem(keys.QUESTIONS);
+          // เคลียร์เฉพาะโครงการและผู้อนุมัติ (คงคำถามและ Auth ไว้เพื่อความเร็วและป้องกันการยิงเซิร์ฟเวอร์หนักเกินจำเป็น)
           localStorage.removeItem(keys.PROJECTS);
           localStorage.removeItem(keys.APPROVERS);
           localStorage.removeItem(keys.APPROVER_TAG);
           localStorage.removeItem(keys.TIME);
+
           // เคลียร์คีย์เวอร์ชันเดิม (ถ้ามี)
-          localStorage.removeItem('FMSA03_LOCAL_QUESTIONS');
+          localStorage.removeItem('CENTRAL_SITE_PROJECTS');
           localStorage.removeItem('FMSA03_LOCAL_PROJECTS');
           localStorage.removeItem('FMSA03_LOCAL_APPROVERS');
           localStorage.removeItem('FMSA03_LOCAL_CACHE_TIME');
-
-          // เคลียร์แคชยืนยันตัวตน เพื่อบังคับเช็คสิทธิ์ใหม่ (Dynamic ตาม App.screenTag)
-          if (window.App && window.App.currentUser && window.App.currentUser.line_uid) {
-            var uid = window.App.currentUser.line_uid;
-            var tag = (window.App.screenTag || 'SA01').trim();
-            localStorage.removeItem('FM_' + tag + '_AUTH_' + uid);
-            localStorage.removeItem('FM_' + tag + '_AUTH_TIME_' + uid);
-            sessionStorage.removeItem('FM_' + tag + '_AUTH_' + uid);
-
-            // เคลียร์คีย์เวอร์ชันเดิม (ถ้ามี)
-            localStorage.removeItem('fmsa01_auth_' + uid);
-            localStorage.removeItem('fmsa01_auth_time_' + uid);
-            sessionStorage.removeItem('fmsa01_auth_' + uid);
-          }
         } catch (e) {
           console.warn('[ChecklistModule] clearLocalCache_ error:', e);
         }
@@ -1569,11 +1593,29 @@
 
       forceRefreshCache: function () {
         var self = this;
+        var btn = document.getElementById('btnRefreshMasterCache');
+        if (btn && btn.disabled) return;
+        if (btn) {
+          btn.disabled = true;
+          btn.setAttribute('data-original-html', btn.innerHTML);
+          btn.innerHTML = '⏳ กำลังอัปเดต...';
+        }
+
         self.clearLocalCache_();
         App.showToast('กำลังดึงข้อมูลโครงการและผู้อนุมัติล่าสุดจากเซิร์ฟเวอร์...', 'info');
         var dateInput = document.getElementById('transDateInput');
         var targetDate = (dateInput && dateInput.value) ? dateInput.value : self.getTodayString_();
         self.loadForm(targetDate, true);
+      },
+
+      _restoreRefreshBtn: function () {
+        var btn = document.getElementById('btnRefreshMasterCache');
+        if (btn) {
+          btn.disabled = false;
+          var orig = btn.getAttribute('data-original-html');
+          if (orig) btn.innerHTML = orig;
+          else btn.innerHTML = '🔄 อัปเดตข้อมูล';
+        }
       },
 
       renderProjectDropdown_: function (projects, selectedProject, isEditable) {
@@ -1699,12 +1741,18 @@
                 self.updateActionButtons_(null, true);
                 self.updateProgress_();
               }
+              if (window.App && typeof window.App.onChecklistLoaded === 'function') {
+                window.App.onChecklistLoaded();
+              }
             })
             .catch(function (err) {
               console.warn('[Checklist] Get transaction error:', err);
               self.renderStatusBanner_(null, true, '');
               self.updateActionButtons_(null, true);
               self.updateProgress_();
+              if (window.App && typeof window.App.onChecklistLoaded === 'function') {
+                window.App.onChecklistLoaded();
+              }
             });
           return;
         }
@@ -1714,6 +1762,7 @@
 
         App.callServer('apiGetChecklistForm', App.currentUser.line_uid, transDate)
           .then(function (res) {
+            self._restoreRefreshBtn();
             App.hideLoading();
             if (res && res.success && res.data) {
               self.currentData = res.data;
@@ -1739,14 +1788,27 @@
               if (cached && cached.approvers && cached.approvers.length > 0) {
                 self.renderApproverDropdown_(cached.approvers);
               }
+              if (cached && cached.projects && cached.projects.length > 0) {
+                self.renderProjectDropdown_(cached.projects);
+              }
+            }
+            if (window.App && typeof window.App.onChecklistLoaded === 'function') {
+              window.App.onChecklistLoaded();
             }
           })
           .catch(function (err) {
+            self._restoreRefreshBtn();
             App.hideLoading();
             App.showToast('เกิดข้อผิดพลาดในการโหลดข้อมูล: ' + err.message, 'error');
             self.renderStatusBanner_(null, true, '');
             if (cached && cached.approvers && cached.approvers.length > 0) {
               self.renderApproverDropdown_(cached.approvers);
+            }
+            if (cached && cached.projects && cached.projects.length > 0) {
+              self.renderProjectDropdown_(cached.projects);
+            }
+            if (window.App && typeof window.App.onChecklistLoaded === 'function') {
+              window.App.onChecklistLoaded();
             }
           });
       },
@@ -2785,30 +2847,11 @@
       App.init(function (user) {
         ChecklistModule.init();
 
+        // Safety fallback: หากผ่านไป 10 วินาทีแล้วยังไม่มีการ trigger ให้เรียก onChecklistLoaded เอง
         if (user && user.line_uid) {
-          // ตรวจสอบคิวอนุมัติหลังจากโหลดหน้าหลักเล็กน้อย พร้อมเก็บผลลัพธ์เข้า ApprovalModule Cache ทันที
           setTimeout(function () {
-            var now = new Date();
-            var currentMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
-            App.callServer('apiGetApprovalQueue', user.line_uid, currentMonth, user.users_name)
-              .then(function (res) {
-                if (res && res.success && res.data) {
-                  if (window.ApprovalModule) {
-                    ApprovalModule.cachedQueueData = res.data;
-                    ApprovalModule.lastLoadedMonth = currentMonth;
-                    ApprovalModule.applyQueueData_(res.data);
-                  }
-                  var total = (res.data.asL1 ? res.data.asL1.length : 0) + (res.data.asL2 ? res.data.asL2.length : 0);
-                  var badge = document.getElementById('approvalQueueBadge');
-                  if (badge) {
-                    badge.textContent = total;
-                    badge.style.display = total > 0 ? 'inline-block' : 'none';
-                  }
-                }
-              }).catch(function (e) {
-                console.warn('[Badge] queue check error:', e);
-              });
-          }, 3500);
+            if (App.onChecklistLoaded) App.onChecklistLoaded();
+          }, 10000);
         }
       });
     });
