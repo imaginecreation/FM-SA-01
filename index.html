@@ -158,7 +158,8 @@
       border-bottom-color: var(--primary);
     }
 
-    .tab-btn:disabled, .tab-btn.tab-disabled {
+    .tab-btn:disabled,
+    .tab-btn.tab-disabled {
       opacity: 0.38;
       cursor: not-allowed !important;
       pointer-events: none !important;
@@ -2884,7 +2885,7 @@
           var stateParams = new URLSearchParams(stateQuery);
           var tabFromState = stateParams.get('tab');
           if (tabFromState) return tabFromState.toLowerCase();
-        } catch (e) {}
+        } catch (e) { }
       }
 
       // ตรวจสอบ URL Hash
@@ -2896,7 +2897,7 @@
           var hashParams = new URLSearchParams(hashQuery);
           var tabFromHash = hashParams.get('tab');
           if (tabFromHash) return tabFromHash.toLowerCase();
-        } catch (e) {}
+        } catch (e) { }
       }
 
       return 'checklist';
